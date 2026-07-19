@@ -3,12 +3,12 @@ import os
 import json
 import fitz  # PyMuPDF
 import docx
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 
 try:
     from backend.config import DEFAULT_LLM_MODEL
 except ImportError:
-    DEFAULT_LLM_MODEL = "gemini-3.5-flash"
+    DEFAULT_LLM_MODEL = "llama-3.1-8b-instant"
 
 def extract_text_from_pdf(file_path):
     """Extract raw text from a PDF file using PyMuPDF."""
@@ -54,6 +54,61 @@ def extract_text(file_path):
         except Exception:
             return ""
 
+def classify_document_type(text):
+    """
+    Classifies a document's text as either 'resume' or 'jd'.
+    Returns 'resume', 'jd', or 'unknown'.
+    """
+    if not text:
+        return 'unknown'
+    text_lower = text.lower()
+    
+    # Resume indicators
+    resume_indicators = [
+        "education", "academic background", "gpa", "work experience", 
+        "professional summary", "projects", "certifications", "skills",
+        "objective", "hobbies", "personal details", "strengths", "languages",
+        "cgp", "internship", "employment history", "career summary"
+    ]
+    
+    # Job Description indicators
+    jd_indicators = [
+        "job description", "responsibilities", "requirements", "qualifications",
+        "we are looking for", "about the role", "key responsibilities", 
+        "job summary", "duties", "reporting to", "apply now", "equal opportunity",
+        "ideal candidate", "role description", "position overview", "what you will do",
+        "about us", "who you are", "what we offer", "benefits", "compensation",
+        "successful candidate", "join our team", "target role", "jd for"
+    ]
+    
+    resume_score = sum(1 for word in resume_indicators if word in text_lower)
+    jd_score = sum(1 for word in jd_indicators if word in text_lower)
+    
+    # Check for email/phone patterns (strong indicators of a candidate resume)
+    email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
+    phone_pattern = r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'
+    
+    # Exclude typical company emails like jobs@, hr@, careers@ for resume scoring
+    emails = re.findall(email_pattern, text)
+    has_personal_email = False
+    for email in emails:
+        email_lower = email.lower()
+        if not any(x in email_lower for x in ["hr@", "careers@", "jobs@", "recruiting@", "apply@", "info@", "contact@"]):
+            has_personal_email = True
+            break
+            
+    if has_personal_email:
+        resume_score += 3
+    if re.search(phone_pattern, text):
+        resume_score += 2
+        
+    if resume_score > jd_score:
+        return 'resume'
+    elif jd_score > resume_score:
+        return 'jd'
+    else:
+        return 'unknown'
+
 def clean_text(text):
     """Basic cleaning of text to remove redundant spacing and control characters."""
     if not text:
@@ -63,12 +118,12 @@ def clean_text(text):
 
 def extract_contact_info(text, api_key=None):
     """Extract Name, Email, Phone, and LinkedIn/GitHub links from text."""
-    api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    api_key = api_key or os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if api_key:
         try:
-            llm = ChatGoogleGenerativeAI(
+            llm = ChatGroq(
                 model=DEFAULT_LLM_MODEL,
-                google_api_key=api_key,
+                groq_api_key=api_key,
                 temperature=0.0
             )
             prompt = f"""
@@ -164,12 +219,12 @@ def segment_resume(text, api_key=None):
     Skills, Experience, Education, Projects, Certifications, Contact.
     Returns a dictionary of sections with their text content.
     """
-    api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    api_key = api_key or os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if api_key:
         try:
-            llm = ChatGoogleGenerativeAI(
+            llm = ChatGroq(
                 model=DEFAULT_LLM_MODEL,
-                google_api_key=api_key,
+                groq_api_key=api_key,
                 temperature=0.0
             )
             prompt = f"""

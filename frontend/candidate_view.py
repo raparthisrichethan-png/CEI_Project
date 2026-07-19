@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import plotly.express as px
-from backend.parser import extract_text, segment_resume, extract_contact_info
+from backend.parser import extract_text, segment_resume, extract_contact_info, classify_document_type
 from backend.similarity_engine import SimilarityEngine
 from frontend.ui_components import render_score_radial, render_glass_card, render_bullet_list
 
@@ -98,32 +98,99 @@ def run_candidate_view(rag_pipeline):
     elif jd_text_direct.strip():
         jd_text = jd_text_direct.strip()
 
-    if not uploaded_resume or not jd_text:
-        st.info("Please upload both a resume and provide a target job description to begin.")
-        return
-
-    # 2. Parsing and Similarity computation
-    with st.spinner("Processing documents locally..."):
-        # Save resume temporarily
+    # Determine Resume Text
+    resume_text = ""
+    if uploaded_resume:
         temp_res_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "resumes")
         os.makedirs(temp_res_dir, exist_ok=True)
         temp_res_path = os.path.join(temp_res_dir, f"temp_cand_{uploaded_resume.name}")
         with open(temp_res_path, "wb") as f:
             f.write(uploaded_resume.getbuffer())
-
-        raw_resume_text = extract_text(temp_res_path)
-        parsed_resume = segment_resume(raw_resume_text, api_key=rag_pipeline.api_key)
-        contact_info = extract_contact_info(raw_resume_text, api_key=rag_pipeline.api_key)
-
-        # Cleanup temp resume
+        resume_text = extract_text(temp_res_path)
         try:
             os.remove(temp_res_path)
         except Exception:
             pass
 
-        # Parse JD via LLM (cached)
-        parsed_jd = rag_pipeline.extract_jd_requirements(jd_text)
+    # Check for misplacement / swaps
+    if resume_text or jd_text:
+        resume_type = classify_document_type(resume_text) if resume_text else 'unknown'
+        jd_type = classify_document_type(jd_text) if jd_text else 'unknown'
+        
+        # Swapped Case
+        if resume_text and jd_text and resume_type == 'jd' and jd_type == 'resume':
+            st.warning(f"⚠️ **Misplaced Files Detected:** It looks like you uploaded a Job Description ({uploaded_resume.name}) in the 'Upload Resume' slot and a Resume ({uploaded_jd.name if uploaded_jd else 'Direct Text'}) in the 'Target Job Description' slot.")
+            swap_files = st.checkbox("🔄 Swap files internally for correct analysis", value=True, key="swap_files_opt")
+            if swap_files:
+                resume_text, jd_text = jd_text, resume_text
+                st.success("💡 **Swapped Mode Active:** Analysis is running with files swapped to their correct roles.")
+        else:
+            # Single misplaced check
+            if resume_text and resume_type == 'jd':
+                st.warning(f"⚠️ **Potential Misplacement:** The file uploaded in the Resume slot ({uploaded_resume.name}) looks like a Job Description. Please ensure you upload your Resume here.")
+            if jd_text and jd_type == 'resume':
+                st.warning(f"⚠️ **Potential Misplacement:** The file uploaded in the Target Job Description slot ({uploaded_jd.name if uploaded_jd else 'Direct Text'}) looks like a Resume. Please ensure you upload the target Job Description here.")
 
+    if not resume_text or not jd_text:
+        st.info("Please upload both a resume and provide a target job description to begin.")
+        return
+
+    # 2. Parsing and Similarity computation (cached using session state and hashing)
+    import hashlib
+    
+    # 2a. Resume Parsing Cache (using text MD5 hash for absolute correctness)
+    resume_cache_key = hashlib.md5(resume_text.encode('utf-8')).hexdigest()
+    if "resume_cache_key" not in st.session_state or st.session_state.resume_cache_key != resume_cache_key:
+        with st.spinner("Processing resume..."):
+            parsed_resume = segment_resume(resume_text, api_key=rag_pipeline.api_key)
+            contact_info = extract_contact_info(resume_text, api_key=rag_pipeline.api_key)
+            
+            st.session_state.resume_cache_key = resume_cache_key
+            st.session_state.cand_parsed_resume = parsed_resume
+            st.session_state.cand_contact_info = contact_info
+    else:
+        parsed_resume = st.session_state.cand_parsed_resume
+        contact_info = st.session_state.cand_contact_info
+
+    # 2b. JD Requirements Extraction Cache
+    jd_hash = hashlib.md5(jd_text.encode('utf-8')).hexdigest()
+    if "cand_jd_hash" not in st.session_state or st.session_state.cand_jd_hash != jd_hash:
+        with st.spinner("Analyzing and structuring Job Description..."):
+            extracted_jd = rag_pipeline.extract_jd_requirements(jd_text)
+        st.session_state.cand_jd_hash = jd_hash
+        st.session_state.cand_extracted_jd = extracted_jd
+        # Initialize editable session state values
+        for key in ["skills", "experience", "education", "projects", "certifications"]:
+            st.session_state[f"cand_jd_{key}"] = extracted_jd.get(key, "")
+
+    # Display extracted requirements in an expander with manual override fields
+    with st.expander("🔍 Verify & Edit JD Requirements (Manual Override)", expanded=True):
+        st.markdown("Review and adjust the extracted requirements below. If AI extraction failed, you can manually paste/type your requirements:")
+        
+        edited_skills = st.text_area("Skills Required:", value=st.session_state.get("cand_jd_skills", ""), key="cand_skills_area")
+        edited_experience = st.text_area("Experience Required:", value=st.session_state.get("cand_jd_experience", ""), key="cand_experience_area")
+        edited_education = st.text_area("Education Required:", value=st.session_state.get("cand_jd_education", ""), key="cand_education_area")
+        edited_projects = st.text_area("Projects Required:", value=st.session_state.get("cand_jd_projects", ""), key="cand_projects_area")
+        edited_certifications = st.text_area("Certifications Required:", value=st.session_state.get("cand_jd_certifications", ""), key="cand_certifications_area")
+        
+        # Save updates back to session state
+        st.session_state["cand_jd_skills"] = edited_skills
+        st.session_state["cand_jd_experience"] = edited_experience
+        st.session_state["cand_jd_education"] = edited_education
+        st.session_state["cand_jd_projects"] = edited_projects
+        st.session_state["cand_jd_certifications"] = edited_certifications
+
+    # Construct the final parsed_jd to be used downstream
+    parsed_jd = {
+        "skills": st.session_state["cand_jd_skills"],
+        "experience": st.session_state["cand_jd_experience"],
+        "education": st.session_state["cand_jd_education"],
+        "projects": st.session_state["cand_jd_projects"],
+        "certifications": st.session_state["cand_jd_certifications"]
+    }
+
+    # 2c. Compute match metrics and ATS score
+    with st.spinner("Computing match metrics..."):
         # Compute semantic match scores
         similarity_engine = SimilarityEngine()
         metrics = similarity_engine.calculate_scores(parsed_resume, parsed_jd)
@@ -131,15 +198,78 @@ def run_candidate_view(rag_pipeline):
         # Calculate ATS score
         ats_score, ats_reasons = calculate_ats_score(parsed_resume, contact_info)
 
-    # 3. Main Scoring dashboard
-    tab_dash, tab_sections, tab_roadmap, tab_chat = st.tabs([
+    # 3. Custom Stateful Tab Selector (prevents Streamlit from resetting active tab on chatbot submit)
+    st.markdown("""
+        <style>
+        /* Style Streamlit horizontal radio to look like premium tabs */
+        div[data-testid="stRadio"] > label {
+            display: none !important;
+        }
+        div[data-testid="stRadio"] > div {
+            display: flex;
+            flex-direction: row;
+            background-color: #f1f5f9;
+            padding: 6px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+            margin-bottom: 20px;
+            width: fit-content;
+        }
+        div[data-testid="stRadio"] > div > label {
+            background-color: transparent !important;
+            padding: 8px 18px !important;
+            border-radius: 8px !important;
+            font-weight: 500 !important;
+            margin-right: 8px !important;
+            transition: all 0.2s ease-in-out !important;
+            cursor: pointer !important;
+            border: none !important;
+        }
+        div[data-testid="stRadio"] > div > label:hover {
+            background-color: #e2e8f0 !important;
+            color: #1e293b !important;
+        }
+        div[data-testid="stRadio"] > div > label:has(input:checked) {
+            background-color: #3b82f6 !important;
+            color: white !important;
+            font-weight: 600 !important;
+            box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.2) !important;
+        }
+        /* Hide the default radio circle inputs */
+        div[data-testid="stRadio"] input[type="radio"] {
+            display: none !important;
+        }
+        div[data-testid="stRadio"] div[data-checked="true"] {
+            display: none !important;
+        }
+        /* Ensure stMarkdown inside the label behaves correctly */
+        div[data-testid="stRadio"] label div[data-testid="stMarkdownContainer"] p {
+            margin: 0 !important;
+            font-size: 0.95rem !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    if "active_cand_tab" not in st.session_state:
+        st.session_state.active_cand_tab = "📊 Score Dashboard"
+
+    cand_tabs = [
         "📊 Score Dashboard", 
         "🔍 Section Analysis", 
         "📈 Learning Roadmap", 
         "💬 AI Hiring Chat"
-    ])
+    ]
+    
+    selected_tab = st.radio(
+        "Navigation Tabs",
+        cand_tabs,
+        index=cand_tabs.index(st.session_state.active_cand_tab),
+        horizontal=True,
+        key="cand_tab_selector_widget"
+    )
+    st.session_state.active_cand_tab = selected_tab
 
-    with tab_dash:
+    if selected_tab == "📊 Score Dashboard":
         st.subheader("Your Matching Score Summary")
         col_g1, col_g2 = st.columns(2)
         with col_g1:
@@ -171,7 +301,7 @@ def run_candidate_view(rag_pipeline):
         st.markdown("### ATS Structure Checklist")
         render_bullet_list("ATS Optimization Details", ats_reasons, icon="✔", icon_color="#10B981")
 
-    with tab_sections:
+    elif selected_tab == "🔍 Section Analysis":
         st.subheader("Segment Analysis & Extracted Content")
         
         col_s1, col_s2 = st.columns(2)
@@ -203,18 +333,7 @@ def run_candidate_view(rag_pipeline):
             }
             st.success(parsed_jd.get(key_map[jd_sec_sel]) or "Requirement not specified.")
 
-        st.markdown("---")
-        st.subheader("AI Match Analysis Report")
-        
-        if rag_pipeline.has_api_key():
-            if st.button("Generate Detailed AI Screening Feedback", key="cand_gen_feedback"):
-                with st.spinner("Analyzing resume against JD..."):
-                    feedback = rag_pipeline.generate_analysis(parsed_resume, parsed_jd)
-                    st.markdown(feedback)
-        else:
-            st.info("Provide a Gemini API Key in the sidebar to generate detailed strengths, weaknesses, and rewrite suggestions.")
-
-    with tab_roadmap:
+    elif selected_tab == "📈 Learning Roadmap":
         st.subheader("Personalized Learning Roadmap & Recommendations")
         st.markdown("Bridge your skill gaps with a customized plan:")
         
@@ -224,9 +343,9 @@ def run_candidate_view(rag_pipeline):
                     roadmap = rag_pipeline.generate_roadmap(parsed_resume, parsed_jd)
                     st.markdown(roadmap)
         else:
-            st.info("Provide a Gemini API Key in the sidebar to generate customized learning roadmaps, project recommendations, and certificates.")
+            st.info("Provide a Groq API Key in the sidebar to generate customized learning roadmaps, project recommendations, and certificates.")
 
-    with tab_chat:
+    elif selected_tab == "💬 AI Hiring Chat":
         st.subheader("Chat with AI Hiring Assistant")
         st.markdown("Ask questions about your resume match, how to improve, what skills you need, or ask for resume bullet-point suggestions.")
 
@@ -261,3 +380,4 @@ def run_candidate_view(rag_pipeline):
                     st.write(response)
             
             st.session_state.chat_history.append({"role": "assistant", "content": response})
+            st.rerun()

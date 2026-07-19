@@ -1,6 +1,6 @@
 import os
 import json
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -15,19 +15,19 @@ from backend.config import (
 class RAGPipeline:
     """
     Orchestrates the retrieval-based text generation pipeline (RAG) using the
-    LangChain framework to call Gemini models via ChatGoogleGenerativeAI.
+    LangChain framework to call models via Groq API.
     """
     
     def __init__(self, api_key=None):
         # Read the API key from argument or environment variables
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.api_key = api_key or os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self.client = None
         
-        # Initialize LangChain ChatGoogleGenerativeAI Client if API key is provided
+        # Initialize LangChain ChatGroq Client if API key is provided
         if self.api_key:
-            self.client = ChatGoogleGenerativeAI(
+            self.client = ChatGroq(
                 model=DEFAULT_LLM_MODEL,
-                google_api_key=self.api_key,
+                groq_api_key=self.api_key,
                 temperature=0.0
             )
 
@@ -39,9 +39,9 @@ class RAGPipeline:
         """Update API key dynamically at runtime."""
         self.api_key = api_key
         if api_key:
-            self.client = ChatGoogleGenerativeAI(
+            self.client = ChatGroq(
                 model=DEFAULT_LLM_MODEL,
-                google_api_key=api_key,
+                groq_api_key=api_key,
                 temperature=0.0
             )
         else:
@@ -104,20 +104,83 @@ class RAGPipeline:
             # Fallback to direct serialization
             return f"Resume Skills: {parsed_resume.get('skills', '')}\nResume Experience: {parsed_resume.get('experience', '')}\nJD Requirements: {parsed_jd.get('skills', '')} - {parsed_jd.get('experience', '')}"
 
+    def _heuristic_extract_jd(self, jd_text):
+        """Heuristic rule-based fallback parser for Job Descriptions."""
+        import re
+        patterns = {
+            "skills": r'\b(?:desired skills|additional skills|technical skills|key skills|skills required|skills|what we are looking for|core skills|technologies)\b',
+            "experience": r'\b(?:experience required|experience|work experience|professional experience|eligibility criteria|eligibility|requirements)\b',
+            "education": r'\b(?:education|qualifications|qualification|degree|academic)\b',
+            "projects": r'\b(?:key responsibilities|responsibilities|role and responsibilities|what you will do|projects|kra|key responsibility areas)\b',
+            "certifications": r'\b(?:certifications|certification|licenses|courses)\b'
+        }
+        
+        sections = {
+            "skills": "",
+            "experience": "",
+            "education": "",
+            "projects": "",
+            "certifications": ""
+        }
+        
+        lines = jd_text.split('\n')
+        current_sec = None
+        
+        for line in lines:
+            clean_line = line.strip()
+            if not clean_line:
+                continue
+                
+            # Check if line matches any section header
+            found_header = False
+            if len(clean_line) < 50:
+                for sec, pat in patterns.items():
+                    if re.search(pat, clean_line.lower()):
+                        current_sec = sec
+                        found_header = True
+                        break
+            
+            if found_header:
+                continue
+                
+            if current_sec:
+                sections[current_sec] += clean_line + "\n"
+                
+        # Clean text in each section
+        for k in sections:
+            sections[k] = sections[k].strip()
+            
+        # Post-processing heuristics
+        # If skills section is empty, look for bullet points containing technical keywords
+        if not sections["skills"]:
+            skills_lines = []
+            for line in lines:
+                if line.strip().startswith(('▪', '*', '-', '•')) and any(w in line.lower() for w in ['python', 'java', 'sql', 'experience', 'knowledge', 'proficiency', 'skills', 'develop', 'ml', 'statistics', 'azure', 'git', 'docker', 'kubernetes']):
+                    skills_lines.append(line.strip())
+            if skills_lines:
+                sections["skills"] = "\n".join(skills_lines)
+                
+        # Fallback slices if still empty
+        if not sections["skills"]:
+            sections["skills"] = jd_text[:800]
+        if not sections["experience"]:
+            sections["experience"] = jd_text[:800]
+        if not sections["education"]:
+            sections["education"] = "Not explicitly parsed"
+        if not sections["projects"]:
+            sections["projects"] = "Not explicitly parsed"
+        if not sections["certifications"]:
+            sections["certifications"] = "Not explicitly parsed"
+            
+        return sections
+
     def extract_jd_requirements(self, jd_text):
         """
         Parse raw Job Description text into structured requirements.
-        If no API Key is available, uses a basic fallback structure.
+        If no API Key is available, uses the heuristic fallback parser.
         """
         if not self.has_api_key():
-            # Basic fallback structure if no API key is present
-            return {
-                "skills": jd_text[:500],
-                "experience": jd_text,
-                "education": "Not specified",
-                "projects": "Not specified",
-                "certifications": "Not specified"
-            }
+            return self._heuristic_extract_jd(jd_text)
 
         # prompt to ask Gemini to structure the Job Description
         prompt = f"""
@@ -152,18 +215,18 @@ class RAGPipeline:
             return parsed
         except Exception as e:
             print(f"Error parsing JD via LLM: {e}. Using fallback.")
-            return {
-                "skills": "Extracting skills failed. " + jd_text[:200],
-                "experience": jd_text[:200],
-                "education": "Not parsed",
-                "projects": "Not parsed",
-                "certifications": "Not parsed"
-            }
+            return self._heuristic_extract_jd(jd_text)
+
+    def _handle_llm_exception(self, e):
+        err_str = str(e)
+        if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower() or "resourceexhausted" in err_str.lower():
+            return "### ⚠️ Quota Exceeded (429 Error)\nThe configured Groq API key has exceeded its rate limit or daily quota. Please clear the pre-populated key in the sidebar and input your own Groq API key to run this feature."
+        return f"Error calling Groq: {e}"
 
     def generate_analysis(self, parsed_resume, parsed_jd):
         """Generate structured screening feedback (strengths, gaps, ATS, suggestions)."""
         if not self.has_api_key():
-            return "### API Key Missing\nPlease provide a Gemini API Key in the sidebar to generate AI feedback."
+            return "### API Key Missing\nPlease provide a Groq API Key in the sidebar to generate AI feedback."
 
         resume_context = f"""
         Skills: {parsed_resume.get('skills', '')}
@@ -191,12 +254,12 @@ class RAGPipeline:
             response = self.client.invoke(prompt)
             return response.content
         except Exception as e:
-            return f"Error calling Gemini: {e}"
+            return self._handle_llm_exception(e)
 
     def generate_roadmap(self, parsed_resume, parsed_jd):
         """Generate learning roadmap, certification, and project recommendations."""
         if not self.has_api_key():
-            return "### API Key Missing\nPlease provide a Gemini API Key in the sidebar to generate your learning roadmap."
+            return "### API Key Missing\nPlease provide a Groq API Key in the sidebar to generate your learning roadmap."
 
         resume_context = f"""
         Skills: {parsed_resume.get('skills', '')}
@@ -220,12 +283,12 @@ class RAGPipeline:
             response = self.client.invoke(prompt)
             return response.content
         except Exception as e:
-            return f"Error calling Gemini: {e}"
+            return self._handle_llm_exception(e)
 
     def generate_comparison(self, parsed_jd, selected_candidates):
         """Generate side-by-side executive candidate comparison using LangChain LLM."""
         if not self.has_api_key():
-            return "### API Key Missing\nPlease provide a Gemini API Key in the sidebar to generate comparative analysis."
+            return "### API Key Missing\nPlease provide a Groq API Key in the sidebar to generate comparative analysis."
 
         comparison_context = ""
         for c in selected_candidates:
@@ -258,7 +321,77 @@ class RAGPipeline:
             response = self.client.invoke(prompt)
             return response.content
         except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower() or "resourceexhausted" in err_str.lower():
+                return "### ⚠️ Quota Exceeded (429 Error)\nThe configured Gemini API key has exceeded its rate limit or daily quota. Please clear the pre-populated key in the sidebar and input your own Google Gemini API key to run this feature."
             return f"Error generating comparison insights: {e}"
+
+    def _get_offline_response(self, user_question, parsed_resume, parsed_jd, metrics):
+        """Helper to return high-quality offline rule-based chatbot responses based on extracted metrics."""
+        q = user_question.lower()
+        
+        # 1. Ask about skills / gap
+        if any(x in q for x in ["skill", "gap", "technolog", "language", "framework"]):
+            res_skills = parsed_resume.get("skills", "")
+            jd_skills = parsed_jd.get("skills", "")
+            return f"""
+**Offline Assistant:** I've analyzed your skills match (Current Score: **{metrics.get('skills_match', 0):.1f}%**).
+
+*   **Your Extracted Skills:** {res_skills if res_skills else 'None found'}
+*   **Job Requirements:** {jd_skills if jd_skills else 'None found'}
+
+**Suggestions to improve:**
+1. Focus on aligning the wording of your skills exactly with the Job Description keywords.
+2. Consider adding relevant side projects to demonstrate practical applications of these tools.
+"""
+
+        # 2. Ask about experience / job history
+        elif any(x in q for x in ["experience", "work", "job", "career", "year"]):
+            return f"""
+**Offline Assistant:** Your experience match score is **{metrics.get('experience_match', 0):.1f}%**.
+
+**Tips to improve your experience description:**
+1. **Use the STAR method:** Describe your work in terms of Situation, Task, Action, and Result (e.g. *"Improved database queries by 40% using indexing"*).
+2. **Quantify achievements:** Try to add numbers, percentages, and metrics to demonstrate business impact.
+3. **Include target keywords:** Make sure tools mentioned in the Job Description (like AWS, Docker, Python) are naturally woven into your job bullet points.
+"""
+
+        # 3. Ask about ATS
+        elif any(x in q for x in ["ats", "score", "format", "check", "structure"]):
+            return f"""
+**Offline Assistant:** Your resume formatting score is evaluated by our local ATS optimizer.
+
+**Core Checkpoints:**
+*   Ensure your contact email and phone are clearly visible in the header.
+*   Use standard headings like **Skills**, **Experience**, **Education**, and **Projects** to help automated parsers index your resume.
+*   Avoid multi-column tables or complex graphics which can scramble text during extraction.
+"""
+
+        # 4. Ask about projects / education / certifications
+        elif any(x in q for x in ["project", "education", "degree", "certificat", "course"]):
+            return f"""
+**Offline Assistant:**
+*   **Projects Match Score:** {metrics.get('projects_match', 0):.1f}%
+*   **Education Match Score:** {metrics.get('education_match', 0):.1f}%
+*   **Certifications Match Score:** {metrics.get('certifications_match', 0):.1f}%
+
+**Recommendations:**
+1. List projects that directly showcase the required technology stack. Include a link to GitHub repositories if possible.
+2. Position your highest and most relevant degree/certifications clearly in the education section.
+"""
+
+        # 5. Default generic response
+        else:
+            return f"""
+**Offline Assistant:** I'm running in offline mode due to a missing or exhausted Groq API Key. Here is a summary of your profile match:
+
+*   **Overall Role Match:** **{metrics.get('overall_score', 0):.1f}%**
+*   **Skills Match:** **{metrics.get('skills_match', 0):.1f}%**
+*   **Experience Match:** **{metrics.get('experience_match', 0):.1f}%**
+*   **Education Match:** **{metrics.get('education_match', 0):.1f}%**
+
+*Tip: You can ask me specific questions about your "skills", "experience", "ATS score", or "projects" to get target suggestions offline! Or configure a valid Groq API Key in the sidebar for full open-ended conversations.*
+"""
 
     def run_chatbot(self, parsed_resume, parsed_jd, metrics, chat_history, user_question):
         """
@@ -266,7 +399,7 @@ class RAGPipeline:
         utilizing structured candidate metrics and local FAISS vector search context.
         """
         if not self.has_api_key():
-            return "I'm sorry, I cannot answer questions without an API key. Please input your Gemini API Key in the sidebar."
+            return self._get_offline_response(user_question, parsed_resume, parsed_jd, metrics)
 
         # Retrieve the most relevant resume & JD context dynamically using FAISS local vector database
         retrieved_context = self._retrieve_context(parsed_resume, parsed_jd, user_question, k=4)
@@ -295,4 +428,8 @@ class RAGPipeline:
             response = self.client.invoke(prompt)
             return response.content
         except Exception as e:
-            return f"Error calling Gemini: {e}"
+            err_str = str(e)
+            offline_resp = self._get_offline_response(user_question, parsed_resume, parsed_jd, metrics)
+            if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower() or "resourceexhausted" in err_str.lower():
+                return f"### ⚠️ Quota Exceeded (429 Error)\nThe configured Groq API key has exceeded its rate limit or daily quota. Clearing the key or using offline mode will allow offline responses.\n\n---\n\n{offline_resp}"
+            return f"### ⚠️ Chatbot Offline Mode Active (API Error)\n*Could not reach Groq API ({err_str}). Falling back to local offline assistant.*\n\n---\n\n{offline_resp}"

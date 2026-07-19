@@ -1,6 +1,6 @@
 # AI-Powered Intelligent Hiring Assistant
 
-An internship-level, production-inspired Generative AI application built to automate resume screening, semantic search, ranking, and candidate evaluation against Job Descriptions (JDs). This application uses local NLP and vector similarity models alongside an optimized cloud RAG architecture (Google Gemini 2.5 Flash) to provide explainable insights and resume feedback while minimizing API token usage.
+An internship-level, production-inspired Generative AI application built to automate resume screening, semantic search, ranking, and candidate evaluation against Job Descriptions (JDs). This application uses local NLP and vector similarity models alongside an optimized cloud RAG architecture (Groq API - Llama 3.1 8B) to provide explainable insights and resume feedback while minimizing API token usage.
 
 ---
 
@@ -29,17 +29,17 @@ To minimize external API dependency and cost, this project enforces:
 2. **Local Embedding & Similarity Engines**: Sentence embeddings (`all-MiniLM-L6-v2`) and vector search (`FAISS`) run locally. Sub-score matching calculations are performed entirely offline using vector cosine similarity.
 3. **Double Caching Layer (SQLite)**:
    - **Embedding Cache**: Persists generated text embeddings to a local SQLite database (`data/cache/embeddings_cache.db`), ensuring subsequent comparisons are instantaneous.
-   - **LLM Response Cache**: Persists Gemini responses (`data/cache/llm_response_cache.db`) for matching query/context hashes to avoid re-generating.
-4. **Context-Only RAG Prompts**: Never sends complete raw resumes or JDs to the LLM. Only structured context strings and target metrics are sent to Gemini to generate final explanations.
+   - **LLM Response Cache**: Persists LLM responses (`data/cache/llm_response_cache.db`) for matching query/context hashes to avoid re-generating.
+4. **Context-Only RAG Prompts**: Never sends complete raw resumes or JDs to the LLM. Only structured context strings and target metrics are sent to Groq to generate final explanations.
 
 ---
 
 ## Tech Stack
-- **Frontend**: Streamlit
+- **Frontend**: Streamlit (White Theme / Light Mode)
 - **Backend Orchestration**: Python, LangChain
 - **Embeddings**: `sentence-transformers/all-MiniLM-L6-v2` (Local)
 - **Vector Store**: `FAISS` (Local)
-- **Large Language Model**: Gemini 2.5 Flash
+- **Large Language Model**: Llama 3.1 8B via Groq API
 - **Document Parsers**: PyMuPDF (`fitz`), `python-docx`
 - **Data Engineering**: Pandas, NumPy, SQLite, Plotly
 
@@ -60,7 +60,7 @@ To minimize external API dependency and cost, this project enforces:
 3. **Configure Environment Variables**:
    Create a `.env` file in the root directory (or enter your key in the Streamlit UI Sidebar):
    ```env
-   GEMINI_API_KEY=your_google_gemini_api_key_here
+   GROQ_API_KEY=your_groq_api_key_here
    ```
 
 4. **Verify the Backend Integration**:
@@ -96,7 +96,7 @@ Similarity Engine (Local Cosine Match Metrics)
 RAG Context Builder (Top-K Chunks)
       │
       ▼
-Gemini 2.5 Flash (Cloud API) ◄──► SQLite Response Cache
+Llama 3.1 8B via Groq API ◄──► SQLite Response Cache
       │
       ▼
 Dashboard Display (Gauges, Tables, Charts, Roadmap, Chatbot)

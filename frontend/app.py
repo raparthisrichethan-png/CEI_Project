@@ -65,21 +65,21 @@ def main():
     st.sidebar.title("Configuration & Navigation")
     
     # API Key handling
-    env_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+    env_key = os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
     api_key = st.sidebar.text_input(
-        "Gemini API Key",
+        "Groq API Key",
         value=env_key,
         type="password",
-        help="Input your Google Gemini API Key. If set in terminal environment variables, it will auto-populate."
+        help="Input your Groq API Key. If set in terminal environment variables (GROQ_API_KEY), it will auto-populate."
     )
     
     # Initialize pipeline
     rag_pipeline = get_rag_pipeline()
-    if api_key:
-        rag_pipeline.set_api_key(api_key)
-        st.sidebar.success("Gemini API Key configured!")
+    rag_pipeline.set_api_key(api_key)
+    if api_key.strip():
+        st.sidebar.success("Groq API Key configured!")
     else:
-        st.sidebar.warning("No API Key detected. RAG features will be disabled. You can still use local semantic matching.")
+        st.sidebar.warning("No API Key detected. Chatbot and RAG features will run in offline helper mode. Local matching is active.")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Dashboard Navigation")
@@ -95,7 +95,7 @@ def main():
     - **Embeddings**: Sentence Transformers `all-MiniLM-L6-v2` (Local)
     - **Vector Matching & DB**: Cosine Similarity & FAISS (Local)
     - **Orchestration**: LangChain Framework
-    - **LLM**: Gemini 3.5 Flash (Cloud API)
+    - **LLM**: Llama 3.1 8B (Cloud Groq API)
     - **RAG Architecture**: Local Vector Retrieval + Cloud LLM
     """)
 

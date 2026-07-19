@@ -20,8 +20,8 @@ DEFAULT_WEIGHTS = {
 # Local Embedding Configuration
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Gemini LLM Configuration
-DEFAULT_LLM_MODEL = "gemini-3.5-flash"
+# Groq LLM Configuration
+DEFAULT_LLM_MODEL = "llama-3.1-8b-instant"
 
 # System Prompt Templates
 

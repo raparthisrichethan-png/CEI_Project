@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import json
-from backend.parser import extract_text, segment_resume, extract_contact_info
+from backend.parser import extract_text, segment_resume, extract_contact_info, classify_document_type
 from backend.similarity_engine import SimilarityEngine
 from backend.config import DEFAULT_WEIGHTS, DEFAULT_LLM_MODEL
 from frontend.ui_components import render_comparison_matrix, render_glass_card
@@ -102,19 +102,55 @@ def run_recruiter_view(rag_pipeline):
                 os.remove(temp_path)
             except Exception:
                 pass
-            st.success(f"Job Description extracted successfully ({len(jd_text)} characters).")
+            
+            jd_type = classify_document_type(jd_text)
+            if jd_type == 'resume':
+                st.warning(f"⚠️ **Potential Misplacement:** The file uploaded in the Job Description slot ({uploaded_jd.name}) looks like a Resume. Please double check your upload.")
+            else:
+                st.success(f"Job Description extracted successfully ({len(jd_text)} characters).")
 
     if not jd_text.strip():
         st.warning("Please provide a Job Description to begin candidate evaluation.")
         return
 
-    # Extract JD requirements once
-    with st.spinner("Analyzing and structuring Job Description..."):
-        parsed_jd = rag_pipeline.extract_jd_requirements(jd_text)
+    # Extract JD requirements once (cached using session state and hashing)
+    import hashlib
+    jd_hash = hashlib.md5(jd_text.encode('utf-8')).hexdigest()
+    
+    if "jd_hash" not in st.session_state or st.session_state.jd_hash != jd_hash:
+        with st.spinner("Analyzing and structuring Job Description..."):
+            extracted_jd = rag_pipeline.extract_jd_requirements(jd_text)
+        st.session_state.jd_hash = jd_hash
+        st.session_state.extracted_jd = extracted_jd
+        # Initialize editable session state values
+        for key in ["skills", "experience", "education", "projects", "certifications"]:
+            st.session_state[f"recruiter_jd_{key}"] = extracted_jd.get(key, "")
 
-    # Display extracted requirements in an expander
-    with st.expander("🔍 View Structured JD Requirements (Extracted by AI)"):
-        st.json(parsed_jd)
+    # Display extracted requirements in an expander with manual override fields
+    with st.expander("🔍 Verify & Edit JD Requirements (Manual Override)", expanded=True):
+        st.markdown("Review and adjust the extracted requirements below. If AI extraction failed, you can manually paste/type your requirements:")
+        
+        edited_skills = st.text_area("Skills Required:", value=st.session_state.get("recruiter_jd_skills", ""), key="recruiter_skills_area")
+        edited_experience = st.text_area("Experience Required:", value=st.session_state.get("recruiter_jd_experience", ""), key="recruiter_experience_area")
+        edited_education = st.text_area("Education Required:", value=st.session_state.get("recruiter_jd_education", ""), key="recruiter_education_area")
+        edited_projects = st.text_area("Projects Required:", value=st.session_state.get("recruiter_jd_projects", ""), key="recruiter_projects_area")
+        edited_certifications = st.text_area("Certifications Required:", value=st.session_state.get("recruiter_jd_certifications", ""), key="recruiter_certifications_area")
+        
+        # Save updates back to session state
+        st.session_state["recruiter_jd_skills"] = edited_skills
+        st.session_state["recruiter_jd_experience"] = edited_experience
+        st.session_state["recruiter_jd_education"] = edited_education
+        st.session_state["recruiter_jd_projects"] = edited_projects
+        st.session_state["recruiter_jd_certifications"] = edited_certifications
+
+    # Construct the final parsed_jd to be used downstream
+    parsed_jd = {
+        "skills": st.session_state["recruiter_jd_skills"],
+        "experience": st.session_state["recruiter_jd_experience"],
+        "education": st.session_state["recruiter_jd_education"],
+        "projects": st.session_state["recruiter_jd_projects"],
+        "certifications": st.session_state["recruiter_jd_certifications"]
+    }
 
     st.markdown("---")
 
@@ -211,6 +247,10 @@ def run_recruiter_view(rag_pipeline):
 
             # Extract raw text & parse
             raw_text = extract_text(temp_path)
+            res_type = classify_document_type(raw_text)
+            if res_type == 'jd':
+                st.warning(f"⚠️ **Potential Misplacement:** The candidate file ({file.name}) looks like a Job Description rather than a Resume. Please review the upload.")
+            
             parsed_resume = segment_resume(raw_text, api_key=rag_pipeline.api_key)
             contact = extract_contact_info(raw_text, api_key=rag_pipeline.api_key)
 
@@ -374,7 +414,7 @@ def run_recruiter_view(rag_pipeline):
                     except Exception as e:
                         st.error(f"Error generating comparison insights: {e}")
         else:
-            st.info("Input a Gemini API Key in the sidebar to generate comparative text summaries.")
+            st.info("Input a Groq API Key in the sidebar to generate comparative text summaries.")
         
         # Deep Dive Analysis of Individual Candidates
         st.markdown("### Individual Profiles & AI Analysis")
@@ -401,11 +441,4 @@ def run_recruiter_view(rag_pipeline):
                     with tab_pr:
                         st.write(c["parsed_resume"].get("projects", "None found."))
                     
-                    if rag_pipeline.has_api_key():
-                        st.markdown("#### AI Screening Report")
-                        if st.button("Generate Detailed Screening Feedback", key=f"btn_feedback_{c['id']}"):
-                            with st.spinner("Analyzing resume content..."):
-                                feedback = rag_pipeline.generate_analysis(c["parsed_resume"], parsed_jd)
-                                st.markdown(feedback)
-                    else:
-                        st.info("Input a Gemini API Key in the sidebar to get detailed AI feedback report.")
+
