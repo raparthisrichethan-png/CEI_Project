@@ -154,3 +154,55 @@ def get_score_color(score):
         return "#F59E0B" # Amber Yellow
     else:
         return "#EF4444" # Red
+
+def render_trust_index(eval_metrics):
+    """
+    Render a premium quality and alignment metrics index card (LLM-as-a-Judge RAG Validation).
+    """
+    if not eval_metrics:
+        return
+        
+    f_score = eval_metrics.get("faithfulness_score", 100)
+    f_reason = eval_metrics.get("faithfulness_reason", "Verified grounded in retrieved context.")
+    r_score = eval_metrics.get("relevance_score", 100)
+    r_reason = eval_metrics.get("relevance_reason", "Response addresses the query prompt accurately.")
+    
+    # Heuristic styling colors based on validation levels
+    f_color = "#10b981" if f_score >= 80 else ("#f59e0b" if f_score >= 50 else "#ef4444")
+    r_color = "#10b981" if r_score >= 80 else ("#f59e0b" if r_score >= 50 else "#ef4444")
+    
+    html = f"""
+    <div style="
+        background-color: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 16px;
+        margin-top: 15px;
+        margin-bottom: 15px;
+        box-shadow: inset 0 2px 4px 0 rgba(0,0,0,0.02);
+    ">
+        <div style="display: flex; align-items: center; margin-bottom: 12px; font-family: 'Outfit', sans-serif;">
+            <span style="font-size: 1.2rem; margin-right: 8px;">🛡️</span>
+            <span style="font-weight: 700; color: #1e293b; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em;">AI Trust & Alignment Index (LLM-as-a-Judge)</span>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+            <!-- Faithfulness Metric -->
+            <div style="background: white; border-radius: 8px; padding: 10px; border: 1px solid #e2e8f0; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span style="font-size: 0.85rem; font-weight: 600; color: #475569; font-family: 'Inter', sans-serif;">Faithfulness (Groundedness)</span>
+                    <span style="font-size: 0.9rem; font-weight: 700; color: {f_color}; font-family: 'Inter', sans-serif;">{f_score}%</span>
+                </div>
+                <div style="font-size: 0.78rem; color: #64748b; line-height: 1.4; font-family: 'Inter', sans-serif;">{f_reason}</div>
+            </div>
+            <!-- Relevance Metric -->
+            <div style="background: white; border-radius: 8px; padding: 10px; border: 1px solid #e2e8f0; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <span style="font-size: 0.85rem; font-weight: 600; color: #475569; font-family: 'Inter', sans-serif;">Answer Relevance</span>
+                    <span style="font-size: 0.9rem; font-weight: 700; color: {r_color}; font-family: 'Inter', sans-serif;">{r_score}%</span>
+                </div>
+                <div style="font-size: 0.78rem; color: #64748b; line-height: 1.4; font-family: 'Inter', sans-serif;">{r_reason}</div>
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(clean_html(html), unsafe_allow_html=True)

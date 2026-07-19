@@ -30,6 +30,11 @@ class RAGPipeline:
                 groq_api_key=self.api_key,
                 temperature=0.0
             )
+            
+        from backend.evaluator import LLMEvaluator
+        from backend.cache import LLMResponseCache
+        self.evaluator = LLMEvaluator(api_key=self.api_key)
+        self.cache = LLMResponseCache()
 
     def has_api_key(self):
         """Check if an API Key is configured."""
@@ -38,14 +43,62 @@ class RAGPipeline:
     def set_api_key(self, api_key):
         """Update API key dynamically at runtime."""
         self.api_key = api_key
+        from backend.evaluator import LLMEvaluator
         if api_key:
             self.client = ChatGroq(
                 model=DEFAULT_LLM_MODEL,
                 groq_api_key=api_key,
                 temperature=0.0
             )
+            self.evaluator = LLMEvaluator(api_key=api_key)
         else:
             self.client = None
+            self.evaluator = LLMEvaluator(api_key=None)
+
+    def _generate_with_eval(self, prompt, context, query, cache_key_prefix=""):
+        """Generate LLM response, run real-time evaluation metrics, and cache metrics/responses."""
+        # 1. Check cache
+        cached = self.cache.get(prompt)
+        if cached:
+            try:
+                import streamlit as st
+                state_key = f"{cache_key_prefix}_eval"
+                st.session_state[state_key] = {
+                    "faithfulness_score": cached["faithfulness_score"],
+                    "faithfulness_reason": cached["faithfulness_reason"],
+                    "relevance_score": cached["relevance_score"],
+                    "relevance_reason": cached["relevance_reason"]
+                }
+            except (ImportError, AttributeError):
+                pass
+            return cached["response_text"]
+
+        # 2. Generate response if cache miss
+        response = self.client.invoke(prompt)
+        response_text = response.content
+
+        # 3. Evaluate response quality (LLM-as-a-Judge)
+        eval_results = self.evaluator.evaluate_response(context, query, response_text)
+
+        # 4. Save to cache
+        self.cache.set(
+            prompt_text=prompt,
+            response_text=response_text,
+            faithfulness_score=eval_results["faithfulness_score"],
+            faithfulness_reason=eval_results["faithfulness_reason"],
+            relevance_score=eval_results["relevance_score"],
+            relevance_reason=eval_results["relevance_reason"]
+        )
+
+        # 5. Store results in Streamlit session state for UI visibility
+        try:
+            import streamlit as st
+            state_key = f"{cache_key_prefix}_eval"
+            st.session_state[state_key] = eval_results
+        except (ImportError, AttributeError):
+            pass
+
+        return response_text
 
     def _retrieve_context(self, parsed_resume, parsed_jd, query, k=4):
         """
@@ -105,16 +158,7 @@ class RAGPipeline:
             return f"Resume Skills: {parsed_resume.get('skills', '')}\nResume Experience: {parsed_resume.get('experience', '')}\nJD Requirements: {parsed_jd.get('skills', '')} - {parsed_jd.get('experience', '')}"
 
     def _heuristic_extract_jd(self, jd_text):
-        """Heuristic rule-based fallback parser for Job Descriptions."""
-        import re
-        patterns = {
-            "skills": r'\b(?:desired skills|additional skills|technical skills|key skills|skills required|skills|what we are looking for|core skills|technologies)\b',
-            "experience": r'\b(?:experience required|experience|work experience|professional experience|eligibility criteria|eligibility|requirements)\b',
-            "education": r'\b(?:education|qualifications|qualification|degree|academic)\b',
-            "projects": r'\b(?:key responsibilities|responsibilities|role and responsibilities|what you will do|projects|kra|key responsibility areas)\b',
-            "certifications": r'\b(?:certifications|certification|licenses|courses)\b'
-        }
-        
+        """Heuristic semantic chunking fallback parser for Job Descriptions."""
         sections = {
             "skills": "",
             "experience": "",
@@ -122,55 +166,57 @@ class RAGPipeline:
             "projects": "",
             "certifications": ""
         }
-        
-        lines = jd_text.split('\n')
-        current_sec = None
-        
-        for line in lines:
-            clean_line = line.strip()
-            if not clean_line:
-                continue
-                
-            # Check if line matches any section header
-            found_header = False
-            if len(clean_line) < 50:
-                for sec, pat in patterns.items():
-                    if re.search(pat, clean_line.lower()):
-                        current_sec = sec
-                        found_header = True
-                        break
+        if not jd_text:
+            return sections
             
-            if found_header:
-                continue
-                
-            if current_sec:
-                sections[current_sec] += clean_line + "\n"
-                
-        # Clean text in each section
-        for k in sections:
-            sections[k] = sections[k].strip()
+        # 1. Chunking
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=80)
+        chunks = splitter.split_text(jd_text)
+        
+        if not chunks:
+            chunks = [jd_text]
             
-        # Post-processing heuristics
-        # If skills section is empty, look for bullet points containing technical keywords
-        if not sections["skills"]:
-            skills_lines = []
-            for line in lines:
-                if line.strip().startswith(('▪', '*', '-', '•')) and any(w in line.lower() for w in ['python', 'java', 'sql', 'experience', 'knowledge', 'proficiency', 'skills', 'develop', 'ml', 'statistics', 'azure', 'git', 'docker', 'kubernetes']):
-                    skills_lines.append(line.strip())
-            if skills_lines:
-                sections["skills"] = "\n".join(skills_lines)
+        # 2. Semantic targets
+        section_queries = {
+            "skills": "required technical skills, technologies, qualifications, programming languages, databases, developer tools, hard skills",
+            "experience": "required experience, background, years of experience, professional duties, key responsibilities, role description",
+            "education": "required education, degree, university, academic requirements, certificates, scholastic background",
+            "projects": "projects, tasks, job responsibilities, key functions, software development activities",
+            "certifications": "required certifications, courses, credentials, licenses, awards"
+        }
+        
+        try:
+            from backend.embedding_engine import EmbeddingEngine
+            from backend.similarity_engine import cosine_similarity
+            
+            engine = EmbeddingEngine()
+            chunk_embeddings = [engine.get_embedding(chunk) for chunk in chunks]
+            
+            for sec, query in section_queries.items():
+                query_embedding = engine.get_embedding(query)
+                similarities = []
                 
-        # Fallback slices if still empty
-        if not sections["skills"]:
-            sections["skills"] = jd_text[:800]
-        if not sections["experience"]:
-            sections["experience"] = jd_text[:800]
-        if not sections["education"]:
-            sections["education"] = "Not explicitly parsed"
-        if not sections["projects"]:
-            sections["projects"] = "Not explicitly parsed"
-        if not sections["certifications"]:
-            sections["certifications"] = "Not explicitly parsed"
+                for idx, c_emb in enumerate(chunk_embeddings):
+                    sim = cosine_similarity(c_emb, query_embedding)
+                    similarities.append((sim, idx))
+                    
+                similarities.sort(key=lambda x: x[0], reverse=True)
+                
+                # Select top-k relevant chunks
+                selected_indices = [idx for sim, idx in similarities[:3] if sim >= 0.22]
+                
+                if not selected_indices and similarities:
+                    selected_indices = [similarities[0][1]]
+                    
+                selected_indices.sort()
+                sections[sec] = "\n\n".join([chunks[idx] for idx in selected_indices])
+                
+        except Exception as e:
+            print(f"Error mapping JD chunks: {e}")
+            n = len(chunks)
+            sections["skills"] = "\n\n".join(chunks[:max(1, int(n*0.5))])
+            sections["experience"] = "\n\n".join(chunks[max(1, int(n*0.5)):])
             
         return sections
 
@@ -250,9 +296,12 @@ class RAGPipeline:
         )
 
         try:
-            # Generation via LangChain wrapper
-            response = self.client.invoke(prompt)
-            return response.content
+            return self._generate_with_eval(
+                prompt=prompt,
+                context=f"Resume Context:\n{resume_context}\n\nJD Context:\n{jd_context}",
+                query="Generate structured screening feedback including strengths, gaps, and suggestions.",
+                cache_key_prefix="analysis"
+            )
         except Exception as e:
             return self._handle_llm_exception(e)
 
@@ -279,9 +328,12 @@ class RAGPipeline:
         )
 
         try:
-            # Generation via LangChain wrapper
-            response = self.client.invoke(prompt)
-            return response.content
+            return self._generate_with_eval(
+                prompt=prompt,
+                context=f"Resume Context:\n{resume_context}\n\nJD Context:\n{jd_context}",
+                query="Generate customized learning roadmap, project recommendations, and industry certifications to bridge candidate gaps.",
+                cache_key_prefix="roadmap"
+            )
         except Exception as e:
             return self._handle_llm_exception(e)
 
@@ -318,12 +370,16 @@ class RAGPipeline:
         """
 
         try:
-            response = self.client.invoke(prompt)
-            return response.content
+            return self._generate_with_eval(
+                prompt=prompt,
+                context=comparison_context,
+                query="Generate side-by-side executive candidate comparison detailing strengths and recommended interview sequencing.",
+                cache_key_prefix="comparison"
+            )
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "quota" in err_str.lower() or "resource_exhausted" in err_str.lower() or "resourceexhausted" in err_str.lower():
-                return "### ⚠️ Quota Exceeded (429 Error)\nThe configured Gemini API key has exceeded its rate limit or daily quota. Please clear the pre-populated key in the sidebar and input your own Google Gemini API key to run this feature."
+                return "### ⚠️ Quota Exceeded (429 Error)\nThe configured Groq API key has exceeded its rate limit or daily quota. Please clear the pre-populated key in the sidebar and input your own Groq API key to run this feature."
             return f"Error generating comparison insights: {e}"
 
     def _get_offline_response(self, user_question, parsed_resume, parsed_jd, metrics):
@@ -424,9 +480,12 @@ class RAGPipeline:
         )
 
         try:
-            # Generation via LangChain wrapper
-            response = self.client.invoke(prompt)
-            return response.content
+            return self._generate_with_eval(
+                prompt=prompt,
+                context=retrieved_context,
+                query=user_question,
+                cache_key_prefix="chatbot"
+            )
         except Exception as e:
             err_str = str(e)
             offline_resp = self._get_offline_response(user_question, parsed_resume, parsed_jd, metrics)

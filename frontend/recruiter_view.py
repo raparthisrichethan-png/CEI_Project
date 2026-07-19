@@ -411,6 +411,9 @@ def run_recruiter_view(rag_pipeline):
                     try:
                         res_text = rag_pipeline.generate_comparison(parsed_jd, selected_candidates)
                         st.markdown(res_text)
+                        if "comparison_eval" in st.session_state:
+                            from frontend.ui_components import render_trust_index
+                            render_trust_index(st.session_state.comparison_eval)
                     except Exception as e:
                         st.error(f"Error generating comparison insights: {e}")
         else:

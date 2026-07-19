@@ -342,6 +342,9 @@ def run_candidate_view(rag_pipeline):
                 with st.spinner("Designing your roadmap..."):
                     roadmap = rag_pipeline.generate_roadmap(parsed_resume, parsed_jd)
                     st.markdown(roadmap)
+                    if "roadmap_eval" in st.session_state:
+                        from frontend.ui_components import render_trust_index
+                        render_trust_index(st.session_state.roadmap_eval)
         else:
             st.info("Provide a Groq API Key in the sidebar to generate customized learning roadmaps, project recommendations, and certificates.")
 
@@ -356,9 +359,12 @@ def run_candidate_view(rag_pipeline):
             ]
 
         # Display Chat History
+        from frontend.ui_components import render_trust_index
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
+                if msg["role"] == "assistant" and msg.get("eval"):
+                    render_trust_index(msg["eval"])
 
         # Chat Input
         if user_input := st.chat_input("Ask a question (e.g. 'How can I improve my experience section?'):"):
@@ -378,6 +384,15 @@ def run_candidate_view(rag_pipeline):
                         user_question=user_input
                     )
                     st.write(response)
+                    if "chatbot_eval" in st.session_state:
+                        render_trust_index(st.session_state.chatbot_eval)
             
-            st.session_state.chat_history.append({"role": "assistant", "content": response})
+            eval_metrics = st.session_state.get("chatbot_eval", None)
+            st.session_state.chat_history.append({
+                "role": "assistant", 
+                "content": response,
+                "eval": eval_metrics
+            })
+            if "chatbot_eval" in st.session_state:
+                del st.session_state["chatbot_eval"]
             st.rerun()

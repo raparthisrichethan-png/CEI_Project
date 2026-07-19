@@ -215,61 +215,10 @@ def extract_contact_info(text, api_key=None):
 
 def segment_resume(text, api_key=None):
     """
-    Segment the resume text into logical parts:
-    Skills, Experience, Education, Projects, Certifications, Contact.
-    Returns a dictionary of sections with their text content.
+    Segment the resume text into logical parts using semantic chunking & relevance mapping.
+    Splits the raw text into chunks and assigns chunks to standard categories:
+    Skills, Experience, Education, Projects, Certifications.
     """
-    api_key = api_key or os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if api_key:
-        try:
-            llm = ChatGroq(
-                model=DEFAULT_LLM_MODEL,
-                groq_api_key=api_key,
-                temperature=0.0
-            )
-            prompt = f"""
-            You are an expert resume parser. Analyze the following resume text and segment it into these seven sections:
-            1. contact (name, email, phone, location, LinkedIn/GitHub links, portfolio)
-            2. skills (technical skills, programming languages, framework, tools, soft skills)
-            3. experience (work experience, job descriptions, roles, dates, achievements)
-            4. education (degrees, schools, GPAs, dates)
-            5. projects (project descriptions, key contributions, technologies used)
-            6. certifications (certifications, licenses, courses, awards)
-            7. other (any other information that does not fit into the above sections, or leave blank if none)
-
-            Format the output STRICTLY as a JSON object with keys: "contact", "skills", "experience", "education", "projects", "certifications", "other".
-            The values must be the extracted text/content corresponding to each section. Do not summarize or alter the original details, keep the extracted descriptions as close to the original text as possible.
-            Do not output any markdown formatting like ```json or trailing text. Output raw JSON string only.
-
-            Resume Text:
-            {text}
-            """
-            response = llm.invoke(prompt)
-            content = response.content.strip()
-            # Clean markdown code blocks if returned
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-            
-            data = json.loads(content)
-            sections = {
-                "contact": str(data.get("contact", "") or ""),
-                "skills": str(data.get("skills", "") or ""),
-                "experience": str(data.get("experience", "") or ""),
-                "education": str(data.get("education", "") or ""),
-                "projects": str(data.get("projects", "") or ""),
-                "certifications": str(data.get("certifications", "") or ""),
-                "other": str(data.get("other", "") or "")
-            }
-            # Clean text in each section
-            for k in sections:
-                sections[k] = clean_text(sections[k])
-            return sections
-        except Exception as e:
-            print(f"Error segmenting resume via LangChain: {e}. Falling back to rule-based parser.")
-
     sections = {
         "contact": "",
         "skills": "",
@@ -283,96 +232,67 @@ def segment_resume(text, api_key=None):
     if not text:
         return sections
 
-    # Define common headers for each section (regex patterns)
-    patterns = {
-        "skills": r'\b(?:technical skills|key skills|skills|expertise|technologies|proficiencies|core competencies)\b',
-        "experience": r'\b(?:experience|work experience|employment history|professional experience|professional background|work history)\b',
-        "education": r'\b(?:education|academic background|academic qualifications|degrees|scholastic background)\b',
-        "projects": r'\b(?:projects|academic projects|personal projects|portfolio|key projects)\b',
-        "certifications": r'\b(?:certifications|licenses|courses|accreditations|professional development|awards)\b',
+    # 1. Chunking raw text into overlapping windows
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=80)
+    chunks = splitter.split_text(text)
+    
+    if not chunks:
+        chunks = [text]
+
+    # 2. Define semantic search anchors
+    section_queries = {
+        "skills": "technical skills, programming languages, software, frameworks, databases, developer tools, hard skills, soft skills",
+        "experience": "work experience, employment history, career background, job description, roles, achievements, professional experience",
+        "education": "academic degrees, university education, college, schools, GPA, graduation, scholastic accomplishments",
+        "projects": "technical projects, github repositories, project descriptions, key contributions, software development projects",
+        "certifications": "professional certifications, industry courses, credentials, awards, honors, achievements"
     }
 
-    # Check if text is flattened (very few newlines)
-    if text.count('\n') < 5:
-        # Flat text segmentation using regex matches
-        matches = []
-        for sec, pat in patterns.items():
-            for m in re.finditer(pat, text, re.IGNORECASE):
-                matches.append((m.start(), sec, m.group(0)))
+    try:
+        from backend.embedding_engine import EmbeddingEngine
+        from backend.similarity_engine import cosine_similarity
         
-        matches.sort()
+        # Load local embedding engine
+        engine = EmbeddingEngine()
+        chunk_embeddings = [engine.get_embedding(chunk) for chunk in chunks]
         
-        # Filter overlapping matches
-        filtered_matches = []
-        last_end = -1
-        for start, sec, val in matches:
-            end = start + len(val)
-            if start >= last_end:
-                filtered_matches.append((start, sec, val))
-                last_end = end
-                
-        if not filtered_matches:
-            sections["other"] = clean_text(text)
-            return sections
+        # Match chunks to sections
+        for sec, query in section_queries.items():
+            query_embedding = engine.get_embedding(query)
+            similarities = []
             
-        first_start, _, _ = filtered_matches[0]
-        sections["contact"] = clean_text(text[:first_start])
-        
-        for i in range(len(filtered_matches)):
-            start, sec, val = filtered_matches[i]
-            next_start = len(text) if i == len(filtered_matches) - 1 else filtered_matches[i+1][0]
-            content = clean_text(text[start + len(val):next_start])
-            
-            if sections[sec]:
-                sections[sec] += " " + content
-            else:
-                sections[sec] = content
+            for idx, c_emb in enumerate(chunk_embeddings):
+                sim = cosine_similarity(c_emb, query_embedding)
+                similarities.append((sim, idx))
                 
-        # Clean up sections
-        for s in sections:
-            sections[s] = clean_text(sections[s])
-        return sections
+            similarities.sort(key=lambda x: x[0], reverse=True)
+            
+            # Select top-k chunks above threshold
+            selected_indices = [idx for sim, idx in similarities[:3] if sim >= 0.22]
+            
+            # Fallback to single best chunk if none met the threshold
+            if not selected_indices and similarities:
+                selected_indices = [similarities[0][1]]
+                
+            selected_indices.sort()
+            
+            top_chunks = [chunks[idx] for idx in selected_indices]
+            sections[sec] = "\n\n".join(top_chunks)
+            
+    except Exception as e:
+        print(f"Error mapping chunks to sections: {e}. Falling back to default list partitioning.")
+        n = len(chunks)
+        sections["skills"] = "\n\n".join(chunks[:max(1, int(n*0.3))])
+        sections["experience"] = "\n\n".join(chunks[max(1, int(n*0.3)):max(2, int(n*0.7))])
+        sections["education"] = "\n\n".join(chunks[max(2, int(n*0.7)):])
 
-    # Find the positions of these sections in normal newline-separated text
-    lines = text.split('\n')
-    section_markers = []
-    
-    for idx, line in enumerate(lines):
-        clean_line = line.strip().lower()
-        # Look for headers that are relatively short (not full sentences)
-        if len(clean_line) < 40:
-            for sec, pat in patterns.items():
-                if re.search(pat, clean_line):
-                    section_markers.append((idx, sec))
-                    break
+    # Contact details heuristic (usually in the first 2 chunks)
+    first_few = "\n".join(chunks[:min(len(chunks), 2)])
+    sections["contact"] = first_few
 
-    # Sort markers by line index
-    section_markers.sort()
-
-    # If no markers were found, we will segment based on keyword matching block-by-block
-    if not section_markers:
-        # Fallback split
-        sections["other"] = clean_text(text)
-        return sections
-
-    # Add contact info as the first implicit section before the first marker
-    first_idx, first_sec = section_markers[0]
-    sections["contact"] = "\n".join(lines[:first_idx])
-
-    # Slice the lines according to markers
-    for i in range(len(section_markers)):
-        current_idx, current_sec = section_markers[i]
-        next_idx = len(lines) if i == len(section_markers) - 1 else section_markers[i+1][0]
+    # Clean text in each section
+    for k in sections:
+        sections[k] = clean_text(sections[k])
         
-        section_content = "\n".join(lines[current_idx + 1:next_idx]).strip()
-        # Append content if section is repeated (rare, but possible)
-        if sections[current_sec]:
-            sections[current_sec] += "\n\n" + section_content
-        else:
-            sections[current_sec] = section_content
-
-    # Clean up sections
-    for sec in sections:
-        sections[sec] = clean_text(sections[sec])
-
     return sections

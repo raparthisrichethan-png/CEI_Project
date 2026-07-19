@@ -15,7 +15,7 @@ An internship-level, production-inspired Generative AI application built to auto
 - **Analytics Visualization**: Interactive Plotly radar charts comparing matching profiles of selected candidates.
 
 ### 👤 Candidate Dashboard
-- **Resume Parsing**: Upload a resume (PDF/DOCX) to extract sections and contact details locally.
+- **Resume Semantic Chunking**: Upload a resume (PDF/DOCX) to split text into overlapping semantic chunks, mapping them to profile dimensions locally.
 - **ATS Optimizer Checklist**: Review structural check results (presence of email, phone, social links, length heuristics) and receive an ATS Score out of 100.
 - **AI Recommendation Engine**: Generate structured lists of resume strengths, weaknesses, and direct rewrite advice.
 - **Personalized Learning Roadmap**: Receive step-by-step technical learning phases, project recommendation templates, and high-value industry certifications to bridge gaps.
@@ -81,7 +81,7 @@ To minimize external API dependency and cost, this project enforces:
 Document Upload (Resume/JD)
       │
       ▼
-Parser (Local PyMuPDF/docx) ──► Structural Extractor (Regex)
+Parser (Local PyMuPDF/docx) ──► Local Semantic Chunking Engine
       │
       ▼
 Embedding Engine (Local Sentence-Transformers) ◄──► SQLite Embedding Cache
